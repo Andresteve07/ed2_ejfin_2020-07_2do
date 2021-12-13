@@ -16,7 +16,7 @@ VALOR_ADC_L RES 1
 REGRE_DE_240 RES 1
 CANT_MEDICIONES RES 1
 REGRE_BUFFER RES 1
- 
+CORTAR_ENVIO RES 1
  
 MI_ADC_F EQU 0
 MI_TMR0_F EQU 1
@@ -90,6 +90,7 @@ CONFIGURAR:
     MOVWF CANT_MEDICIONES;
     MOVLW .20;
     MOVWF REGRE_BUFFER;
+    CLRF CORTAR_ENVIO;
     
     CALL CONFIG_ADC;
     CALL CONFIG_TIMER0;
@@ -103,12 +104,15 @@ RUTINA_INTERR:
     SWAPF STATUS, W
     MOVWF TEMP_STATUS
     
+    
+    BTFSC INTCON, T0IF;salta cuando pasan 250ms
+    CALL PASARON_250M;
+    
     BTFSC PIR1, ADIF;SALTO EL ADC?
-    BSF BANDERAS, MI_ADC_F;LEVANTO MI BANDERA ADC
-    BTFSC INTCON, T0IF;
-    BSF BANDERAS, MI_TMR0_F;LEVANTO MI BANDERA TMR0
-    BTFSC PIR1, TXIF;
-    BSF BANDERAS, MI_ENVIO8B_F;LEVANTO MI BANDERA DE ENVIO DE 8bits TERMINADO
+    CALL CONVERSION_DISP;
+    
+    BTFSC PIR1, TXIF;salta cuando termina de transmitir ultimos 8bit
+    CALL ENVIAR_PROX_8BITS;
     
     
     SWAPF TEMP_STATUS, W
@@ -121,8 +125,6 @@ RUTINA_INTERR:
     
     
 GUARDAR_EN_BUFF:
-    BTFSC BANDERAS,MI_ENVIO_EN_PROG;che, si hay un envio en progreso no hago nada.
-    RETURN;
     ;Vamos a guardar 10 pares por medicion osea un total de 20 registros de la mem.
     MOVFW VALOR_ADC_H;
     MOVWF INDF;
@@ -132,11 +134,14 @@ GUARDAR_EN_BUFF:
     INCF FSR;
     DECFSZ CANT_MEDICIONES;
     RETURN;
-    BSF BANDERAS, MI_BUF_COMPL;
-    
+    ;tengo el bufer lleno
+    CLRF CORTAR_ENVIO;
+    CALL ENVIAR_BUF_POR_UART
+    RETURN;
     
     
 CONVERSION_DISP:
+    BCF PIR1, ADIF;
     ;ADRESH                ADRESL
     ;[_ _ _ _ _ _ B B] [B B B B B B B B]
     ; 0 0 0 0 0 0 0 0   0 0 0 0 0 0 0 0 minimo 0v 0 grados
@@ -151,90 +156,55 @@ CONVERSION_DISP:
     MOVWF VALOR_ADC_L;
     MOVF ADRESH,W;
     MOVWF VALOR_ADC_H;
-    BCF PIR1, ADIF; LIMPIO EL FLAG DE INT DEL ADC PORQ HAY QUE HACER LO MINIMO POSIBLE EN LA RUTINA DE INT.
-    ;BSF ADCON0, GO; YA TE LEÍ ARRANCA A CONVERTIR EL PROXIMO VALOR
-    BCF BANDERAS,MI_ADC_F;BAJO MI BANDERA DEL ADC, limpio la bandera que me trajo aqui.
+     
     CALL GUARDAR_EN_BUFF;
     RETURN
     
 PASARON_250M:
+    BCF INTCON, T0IF;limpio bandera timer
     MOVLW .14;
-    MOVWF TMR0;
-    DECFSZ REGRE_DE_240, F;
+    MOVWF TMR0;cargo el valor del timer para que cuente los prox 250ms
+    
+    DECFSZ REGRE_DE_240, F;determinamos que 240*250ms=1min
     RETURN
-    BSF BANDERAS, MI_1MIN_F;LEVANTO MI BANDERA DE 1SEG
+    ;en este punto paso 1MIN
     MOVLW .240;
-    MOVWF REGRE_DE_240;
-    BCF INTCON, T0IF;
-    BCF BANDERAS, MI_TMR0_F;BAJO MI BANDERA DEL TIMER0
+    MOVWF REGRE_DE_240;restablece el valor del regresivo
+    
+    CALL PASO_UN_MIN;
+    
     RETURN;
 
     
 ENVIAR_BUF_POR_UART:
-    BSF BANDERAS, MI_ENVIO_EN_PROG;che hay un envio en prog que nadie toque el bufer
     MOVLW .10;
     MOVWF CANT_MEDICIONES;restaruo el valor de la cant de med que necesito en el bufer
-    MOVLW 0xA0;
+    MOVLW 0xA0; cuando esta lleno el buffer FSR apunta al final osea dir 0xB4
     MOVWF FSR;restaruo ek valor del puntero al buffer
-    BCF BANDERAS, MI_BUF_COMPL;limpio la bandera que me trajo aqui.
     CALL ENVIAR_PROX_8BITS;
     RETURN;
 
 ENVIAR_PROX_8BITS:
+    BCF PIR1, TXIF;
+    BTFSC CORTAR_ENVIO,0;
+    RETURN;
     MOVFW INDF;
     MOVWF TXREG;
+    INCF FSR;
     DECFSZ REGRE_BUFFER;
     RETURN;
-    BCF BANDERAS, MI_ENVIO8B_F;limpio la bandera que me trajo aqui desde la interrupcion.
-    BSF BANDERAS, MI_ENVIO_COMPLETADO;
+    ;ya termine de mandar todo el bufer
+    MOVLW .1;
+    MOVWF CORTAR_ENVIO;
     
-    
-
-ENVIO_BUF_COMPLETO:
-    MOVLW .20;
-    MOVWF REGRE_BUFFER;restarurar el valor para cuando quiera enviar el buffer completo la proxima vez
-    BCF BANDERAS, MI_ENVIO_COMPLETADO;limpio la bandera que me trajo aqui
-    BCF BANDERAS, MI_ENVIO_EN_PROG;limpio la bandera para que se pueda usar el buffer de nuevo.
-    MOVLW 0xA0;
-    MOVWF FSR;restauramos el valor del puntero para poder guardar las nuevas mediciones.
-    
-    RETURN
     
 PASO_UN_MIN:
     ;ACA TENGO QUE COMENZAR LA CONVERSION
-    BCF ADCON0,GO;
-    BCF BANDERAS, MI_1MIN_F;BAJO MI BANDERA DE 1MIN
+    BSF ADCON0,GO;
     RETURN
     
 MAIN
     CALL CONFIGURAR;
 LOOP
-    BTFSC BANDERAS, MI_ADC_F;SI SALTO LA BANDERA DEL ADC ENTONCES REVISO LA CONVERSION
-    CALL CONVERSION_DISP;
-    
-    BTFSC BANDERAS, MI_TMR0_F;SI SALTO LA BANDERA DEL TIMER CADA 250 MILISEC
-    CALL PASARON_250M;
-    
-    BTFSC BANDERAS, MI_1MIN_F;SI SALTO LA BANDERA CUANDO PASO 1 MIN.
-    CALL PASO_UN_MIN;
-    
-    BTFSC BANDERAS, MI_BUF_COMPL;SI SALTO LA BANDERA DE QUE EL BUFER ESTA COMPLETO.
-    CALL ENVIAR_BUF_POR_UART;
-    
-    BTFSC BANDERAS, MI_ENVIO8B_F;SI SALTO LA BANDERA DE QUE EL BUFER ESTA COMPLETO.
-    CALL ENVIAR_PROX_8BITS;
-    
-    BTFSC BANDERAS, MI_ENVIO_COMPLETADO;SI SALTO LA BANDERA DE QUE EL BUFER ESTA COMPLETO.
-    CALL ENVIO_BUF_COMPLETO;
     GOTO LOOP;
-    
-
     END
-
-    
-
-
-
-
-    
-   
